@@ -83,6 +83,8 @@ typedef NS_ENUM(NSUInteger, ResponseFormat) {
     ResponseFormat responseFormat;
     BOOL * followRedirect;
     BOOL backgroundTask;
+    BOOL uploadTask;
+    NSURL *uploadTempFile;
 }
 
 @end
@@ -154,6 +156,15 @@ NSOperationQueue *taskQueue;
     return ret;
 }
 
+- (void) removeUploadTempFile {
+    if (uploadTempFile) {
+        NSError *error = nil;
+        if (![[NSFileManager defaultManager] removeItemAtURL:uploadTempFile error:&error]) {
+            NSLog(@"Error: %@", error.localizedDescription);
+        }
+    }
+}
+
 // send HTTP request
 - (void) sendRequest:(__weak NSDictionary  * _Nullable )options
        contentLength:(long) contentLength
@@ -169,7 +180,8 @@ NSOperationQueue *taskQueue;
     self.expectedBytes = 0;
     self.receivedBytes = 0;
     self.options = options;
-    
+
+    uploadTask = [options valueForKey:@"IOSUploadTask"] == nil ? NO : [[options valueForKey:@"IOSUploadTask"] boolValue];
     backgroundTask = [options valueForKey:@"IOSBackgroundTask"] == nil ? NO : [[options valueForKey:@"IOSBackgroundTask"] boolValue];
     followRedirect = [options valueForKey:@"followRedirect"] == nil ? YES : [[options valueForKey:@"followRedirect"] boolValue];
     isIncrement = [options valueForKey:@"increment"] == nil ? NO : [[options valueForKey:@"increment"] boolValue];
@@ -240,7 +252,25 @@ NSOperationQueue *taskQueue;
         respFile = NO;
     }
 
-    __block NSURLSessionDataTask * task = [session dataTaskWithRequest:req];
+    __block NSURLSessionTask * task;
+    if (uploadTask && req.HTTPBody) {
+        NSString *tempPath = [RNFetchBlobFS getTempPath];
+        NSURL *tempRootDir = [NSURL fileURLWithPath:tempPath isDirectory:YES];
+        NSURL *tempDir = [tempRootDir URLByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
+        NSError *error;
+        if (![[NSFileManager defaultManager] createDirectoryAtURL:tempDir withIntermediateDirectories:YES attributes:nil error:&error]) {
+            callback(@[error.localizedDescription]);
+            return;
+        }
+        uploadTempFile = [tempDir URLByAppendingPathComponent:taskId];
+        if (![req.HTTPBody writeToURL:uploadTempFile options:NSDataWritingAtomic error:&error]) {
+            callback(@[error.localizedDescription]);
+            return;
+        }
+        task = [session uploadTaskWithRequest:req fromFile:uploadTempFile];
+    } else {
+        task = [session dataTaskWithRequest:req];
+    }
     [taskTable setObject:task forKey:taskId];
     [task resume];
 
@@ -536,6 +566,7 @@ NSOperationQueue *taskQueue;
 
 
     callback(@[ errMsg, rnfbRespType, respStr]);
+    [self removeUploadTempFile];
 
     @synchronized(taskTable, uploadProgressTable, progressTable)
     {
